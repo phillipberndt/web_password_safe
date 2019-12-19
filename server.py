@@ -68,7 +68,6 @@ def parse_auth_data(auth_data):
     public_key = cbor2.loads(auth_data[55 + credential_id_length:])
 
     # Only accept the keys we would like to see
-    print(public_key)
     assert public_key[-1] == 1  # P-256
     assert public_key[3] == -7  # ECDSA with SHA256
     assert public_key[1] == 2   # Elliptic
@@ -112,7 +111,6 @@ def retrieve():
                 key_id, credential_id, x, y, public_key = line.strip().split(";")
             except ValueError:
                 continue
-            print(credential_id)
             if credential_id == client_credential_id:
                 fcntl.lockf(credentials_store.fileno(), fcntl.LOCK_UN)
                 break
