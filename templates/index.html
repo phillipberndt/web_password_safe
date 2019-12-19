@@ -1,0 +1,365 @@
+<!DOCTYPE HTML>
+<meta charset=utf8>
+<meta name="viewport" content="width=device-width, initial-scale=1,maximum-scale=1, minimum-scale=1">
+<title>Password store</title>
+<style type="text/css">
+body, html {
+	margin: 0;
+	padding: 0;
+	font-size: 110%;
+}
+
+input {
+	display: block;
+	width: calc(100% - 4em);
+	padding: 1em;
+	margin: .5em;
+	top: 0;
+}
+
+header {
+	position: fixed;
+	margin: 0;
+	top: 0;
+	background: #fff;
+	background-clip: padding-box;
+	z-index: 1;
+	height: 3em;
+	width: 100%;
+	border-width: 0 0 1em 0;
+	border-style: solid;
+	border-image: linear-gradient(to bottom, rgba(255, 255, 255, 255), rgba(0, 0, 0, 0));
+	border-image-slice: 0 0 100%;
+}
+
+output {
+	scroll-behaviour: smooth;
+	position: absolute;
+	top: 3em;
+	z-index: 0;
+	width: 100%;
+	overflow: hidden;
+}
+
+output ul {
+	margin: 0;
+	padding: 0;
+	width: 100%;
+}
+
+output li:first-child {
+	border-top: 1px solid #aaa;
+}
+
+output li {
+	display: block;
+	border-bottom: 1px solid #aaa;
+	padding: 1em;
+	width: 100%;
+}
+
+output li span {
+	padding: 0 .5em;
+}
+
+output li span:first-child {
+	padding: 0;
+}
+</style>
+<script defer>
+"use strict";
+
+(() => {
+	let secrets = {};
+
+	/* Primitives */
+	let base64ToArray = (d) => Uint8Array.from(Array.prototype.map.call(atob(d.replace(/-/g, "+").replace(/_/g, "/")), (x) => x.charCodeAt(0)));
+	let arrayBufToBase64 = (a) => btoa(String.fromCharCode(...new Uint8Array(a)));
+
+	/* Local key database */
+	let dbOpen = () => {
+		return new Promise((fulfill, reject) => {
+			let db = indexedDB.open("keyStore", 5);
+			db.onsuccess = (e) => {
+				let dbh = e.target.result;
+				fulfill(dbh);
+			};
+			db.onerror = (e) => reject(e.error);
+			db.onblocked = (e) => reject("Database blocked");
+			db.onupgradeneeded = (e) => {
+				let dbh = e.target.result;
+				if(!dbh.objectStoreNames.contains("keyStore")) {
+					let objectStore = dbh.createObjectStore("keyStore", {autoIncrement: true});
+					objectStore.createIndex("name", "name", {unique: true});
+				}
+				fulfill(dbh);
+			};
+		});
+	};
+
+	let dbStore = (dbh, key, obj) => {
+		return new Promise((fulfill, reject) => {
+			let transaction = dbh.transaction(["keyStore"], "readwrite");
+			transaction.onerror = (e) => reject(e.error);
+			transaction.onabort = (e) => reject(e.error);
+			transaction.oncomplete = (e) => fulfill(obj);
+
+			let objectStore = transaction.objectStore("keyStore");
+			let request = objectStore.put({
+				"name": key,
+				"obj": obj
+			});
+		});
+	};
+
+	let dbClear = (dbh) => {
+		return new Promise((fulfill, reject) => {
+			let transaction = dbh.transaction(["keyStore"], "readwrite");
+			transaction.onerror = (e) => reject(e.error);
+			transaction.onabort = (e) => reject(e.error);
+
+			let objectStore = transaction.objectStore("keyStore");
+			let request = objectStore.clear();
+
+			request.onsuccess = (e) => fulfill();
+			request.onerror = (e) => reject(e.error);
+		});
+	};
+
+	let dbGet = (dbh, key) => {
+		return new Promise((fulfill, reject) => {
+			let transaction = dbh.transaction(["keyStore"], "readonly");
+			transaction.onerror = (e) => reject(e.error);
+			transaction.onabort = (e) => reject(e.error);
+
+			let objectStore = transaction.objectStore("keyStore");
+			let request = objectStore.index("name").get(key);
+
+			request.onsuccess = (e) => {
+				if(typeof e.target.result == "undefined") {
+					reject("Not found");
+				}
+				else {
+					fulfill(e.target.result.obj);
+				}
+			}
+			request.onerror = (e) => reject(e.error);
+		});
+	};
+
+	/* Key generation and communication */
+	let getChallenge = async () => {
+		let response = await fetch("challenge", {"method": "POST"});
+		let json = await response.json();
+		return Uint8Array.from(atob(json["challenge"]), c => c.charCodeAt(0))
+	}
+
+	let fetchPostJSON = (url, data) => {
+		return fetch(url, {
+			"method": "POST",
+			"headers": {
+				"Content-Type": "application/json",
+			},
+			"body": JSON.stringify(data),
+		});
+	};
+
+	{% if ALLOW_REGISTRATION %}
+	let check = async () => {
+		let dbh = await dbOpen();
+		let has = false;
+		try {
+			let key = await dbGet(dbh, "key" );
+			has = true;
+		}
+		catch(e) { }
+		dbh.close();
+		return has;
+	};
+
+	let register = async () => {
+		let credential = await navigator.credentials.create({
+			publicKey: {
+				challenge: await getChallenge(),
+				rp: {
+					name: "Password store",
+				},
+				user: {
+					name: "Password store user",
+					id: new TextEncoder("utf-8").encode("Password store user"),
+					displayName: "Password store user"
+				},
+				authenticatorSelection: {
+					// authenticatorAttachment: "platform",
+					// residentKey: "discouraged",
+					// userVerification: "discouraged"
+				},
+				pubKeyCredParams: [{alg: -7, type: "public-key"}],
+				timeout: 60000,
+				attestation: "none"
+			}
+		});
+
+		let attestationObject = arrayBufToBase64(credential.response.attestationObject);
+		let clientDataJSON = arrayBufToBase64(credential.response.clientDataJSON);
+
+		/* base64url to base64, except for not adding ='s at the end */
+		let id = credential.id.replace(/-/g, "+").replace(/_/g, "/");
+
+		let response = await fetchPostJSON("register", {
+			"attestationObject": attestationObject,
+			"clientDataJSON": clientDataJSON,
+		});
+
+		let responseJSON = await response.json();
+		let keyDataEnc = responseJSON["pk"];
+		let keyData = base64ToArray(keyDataEnc);
+		let key = await crypto.subtle.importKey("pkcs8", keyData, {"name": "RSA-OAEP", "hash": "SHA-256"}, false, ["decrypt"]);
+
+		let dbh = await dbOpen();
+		await dbClear(dbh);
+		await dbStore(dbh, "key", key);
+		await dbStore(dbh, "id", id);
+		dbh.close();
+
+		alert("Credentials successfully stored!");
+	};
+	{%- endif -%}
+
+	let retrieve = async () => {
+		let dbh = await dbOpen();
+		let key = await dbGet(dbh, "key" );
+		let id = await dbGet(dbh, "id");
+		dbh.close();
+
+		let credential = await navigator.credentials.get({
+			publicKey: {
+				challenge: await getChallenge(),
+				allowCredentials: [{"id": base64ToArray(id), type: "public-key"}],
+				timeout: 60000
+			}
+		});
+
+		let authenticatorData = arrayBufToBase64(credential.response.authenticatorData);
+		let clientDataJSON = arrayBufToBase64(credential.response.clientDataJSON);
+		let signature = arrayBufToBase64(credential.response.signature);
+
+		let response = await fetchPostJSON("retrieve", {
+			"authenticatorData": authenticatorData,
+			"clientDataJSON": clientDataJSON,
+			"signature": signature,
+			"id": id
+		});
+
+		let responseJSON = await response.json();
+		let symmetricKeyData = await crypto.subtle.decrypt({name: "RSA-OAEP", hash: "SHA-256"}, key, base64ToArray(responseJSON["key"]));
+		let symmetricKey = await crypto.subtle.importKey("raw", symmetricKeyData, {"name": "AES-GCM"}, true, ["decrypt"]);
+		let resultBuf = await crypto.subtle.decrypt({name: "AES-GCM", iv: base64ToArray(responseJSON["nonce"]), tagLength: 128}, symmetricKey, base64ToArray(responseJSON["ct"]));
+		let result = new TextDecoder().decode(resultBuf);
+
+		return JSON.parse(result);
+	};
+
+	let load = async () => {
+		{% if ALLOW_REGISTRATION %}
+		if(!await check()) await register();
+		{% endif %}
+
+		secrets = await retrieve();
+
+		let datalist = document.querySelector("datalist");
+		let ul = document.querySelector("ul");
+
+		for(let secret in secrets) {
+			let data = secrets[secret];
+
+			let option = document.createElement("option");
+			option.setAttribute("value", secret);
+			datalist.appendChild(option);
+
+			let li = document.createElement("li");
+			li.style.display = "none";
+			let span = document.createElement("span");
+			span.innerText = secret;
+			span.style.fontWeight = "bold";
+			li.appendChild(span);
+			li.insertAdjacentText("beforeend", " ");
+
+			for(let part of data) {
+				let span = document.createElement("span");
+				span.innerText = part;
+				li.appendChild(span);
+				li.insertAdjacentText("beforeend", " ");
+			}
+			ul.appendChild(li);
+		}
+
+
+		document.querySelector("output").addEventListener("click", (e) => {
+			if(e.target.nodeName != "SPAN") return false;
+			e.preventDefault();
+
+			e.target.style.color = "#a30";
+			navigator.clipboard.writeText(e.target.innerText);
+			setTimeout(() => {
+				e.target.style.color = "";
+			}, 1000);
+
+			return true;
+		}, true);
+
+		let handler = (e) => {
+			let value = e.target.value.toLowerCase();
+
+			for (let element of ul.querySelectorAll("li")) {
+				let title = element.querySelector("span").innerText;
+				let isMatch = value.length > 2 && title.toLowerCase().indexOf(value) > -1;
+				if(isMatch) {
+					element.style.display = "";
+				}
+				else {
+					element.style.display = "none";
+				}
+			}
+		};
+		let filter = document.querySelector("input");
+		filter.addEventListener("input", handler);
+	};
+
+	window.addEventListener("blur", () => {
+		secrets = {};
+		for(let option of document.querySelectorAll("datalist option")) {
+			option.remove();
+		}
+		for(let li of document.querySelectorAll("ul li")) {
+			li.remove();
+		}
+	}, false);
+
+	window.addEventListener("load", () => {
+		(async () => {
+			await load();
+			let focusHandler = async () => {
+				window.removeEventListener("focus", focusHandler);
+				if(Object.keys(secrets).length == 0) {
+					await load();
+				}
+				window.addEventListener("focus", focusHandler, false);
+			}
+			window.addEventListener("focus", focusHandler, false);
+		})().catch(console.exception);
+	});
+
+})();
+</script>
+<body>
+	<header>
+		<input list="names" autofocus>
+		<datalist id="names">
+		</datalist>
+	</header>
+	<output>
+		<ul>
+		</ul>
+	</output>
+</body>
